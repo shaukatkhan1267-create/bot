@@ -1,0 +1,189 @@
+// install: npm install whatsapp-web.js qrcode-terminal fs
+const { Client, LocalAuth, Buttons } = require("whatsapp-web.js");
+const qrcode = require("qrcode-terminal");
+const fs = require("fs");
+
+const client = new Client({
+    authStrategy: new LocalAuth()
+});
+
+let orders = {};
+const ORDER_FILE = "orders.json";
+
+// Load old orders if available
+if (fs.existsSync(ORDER_FILE)) {
+    orders = JSON.parse(fs.readFileSync(ORDER_FILE, "utf8"));
+}
+
+// Menu
+const menu = {
+    "Fruits": {
+        "Apple": 120,
+        "Banana": 50,
+        "Mango": 80
+    },
+    "Vegetables": {
+        "Potato": 30,
+        "Onion": 40,
+        "Tomato": 25
+    },
+    "Dairy": {
+        "Milk (1L)": 25,
+        "Curd (500g)": 30,
+        "Cheese (200g)": 90
+    }
+};
+
+// QR show
+client.on("qr", qr => {
+    qrcode.generate(qr, { small: true });
+});
+
+client.on("ready", () => {
+    console.log("✅ Grocery Bot is ready with buttons!");
+});
+
+client.on("message", async msg => {
+    const chatId = msg.from;
+    const text = msg.body.toLowerCase();
+
+    if (!orders[chatId]) {
+        orders[chatId] = { cart: [], stage: "start" };
+    }
+
+    // Greeting with buttons
+    if (text === "hi" || text === "hello") {
+        const button = new Buttons(
+            "👋 Welcome to *Your Grocery Store*! \nChoose an option:",
+            [
+                { body: "📜 Menu" },
+                { body: "🛒 Cart" },
+                { body: "✅ Done" }
+            ],
+            "Your Grocery Store",
+            "Powered by RTG"
+        );
+        client.sendMessage(chatId, button);
+    }
+
+    // Show Menu
+    else if (text.includes("menu")) {
+        let menuMsg = "📜 *Grocery Menu:*\n";
+        for (let category in menu) {
+            menuMsg += `\n🍴 *${category}*\n`;
+            for (let item in menu[category]) {
+                menuMsg += `- ${item} : ₹${menu[category][item]}\n`;
+            }
+        }
+        menuMsg += "\n👉 Type item name + quantity (Example: Apple 2)";
+        client.sendMessage(chatId, menuMsg);
+    }
+
+    // Add to cart
+    else if (/^\w+/.test(msg.body)) {
+        let found = false;
+        for (let category in menu) {
+            for (let item in menu[category]) {
+                if (text.includes(item.toLowerCase())) {
+                    const quantity = parseInt(text.replace(/\D/g, "")) || 1;
+                    const price = menu[category][item] * quantity;
+                    orders[chatId].cart.push({ item, quantity, price });
+
+                    const button = new Buttons(
+                        `✅ Added: *${item} (${quantity})* = ₹${price}`,
+                        [
+                            { body: "🛒 Cart" },
+                            { body: "✅ Done" },
+                            { body: "❌ Clear Cart" }
+                        ],
+                        "Your Grocery Store",
+                        "Manage your order"
+                    );
+                    client.sendMessage(chatId, button);
+                    found = true;
+                }
+            }
+        }
+        if (!found) {
+            client.sendMessage(chatId, "⚠️ Item not found. Type 'menu' to see available items.");
+        }
+    }
+
+    // Show Cart
+    else if (text.includes("cart")) {
+        if (orders[chatId].cart.length === 0) {
+            client.sendMessage(chatId, "🛒 Your cart is empty. Type 'menu' to order.");
+        } else {
+            let cartMsg = "🛒 *Your Cart:*\n";
+            let total = 0;
+            orders[chatId].cart.forEach((c, i) => {
+                cartMsg += `${i + 1}. ${c.item} x${c.quantity} = ₹${c.price}\n`;
+                total += c.price;
+            });
+            cartMsg += `\n💰 Total: ₹${total}`;
+
+            const button = new Buttons(
+                cartMsg,
+                [
+                    { body: "✅ Done" },
+                    { body: "❌ Clear Cart" }
+                ],
+                "Your Grocery Store",
+                "Confirm or Clear your order"
+            );
+            client.sendMessage(chatId, button);
+        }
+    }
+
+    // Clear Cart
+    else if (text.includes("clear cart")) {
+        orders[chatId].cart = [];
+        client.sendMessage(chatId, "🗑️ Cart cleared! Type 'menu' to order again.");
+    }
+
+    // Confirm Order
+    else if (text.includes("done")) {
+        if (orders[chatId].cart.length === 0) {
+            client.sendMessage(chatId, "⚠️ Your cart is empty.");
+        } else {
+            orders[chatId].stage = "confirm";
+            client.sendMessage(chatId, "📍 Please provide your *Name, Address & Phone* (Format: Name | Address | Phone)");
+        }
+    }
+
+    // Save Order Details
+    else if (orders[chatId].stage === "confirm" && msg.body.includes("|")) {
+        const [name, address, phone] = msg.body.split("|").map(v => v.trim());
+        let total = orders[chatId].cart.reduce((sum, i) => sum + i.price, 0);
+
+        const orderDetails = {
+            name, address, phone,
+            items: orders[chatId].cart,
+            total,
+            date: new Date().toLocaleString()
+        };
+
+        let allOrders = [];
+        if (fs.existsSync(ORDER_FILE)) {
+            allOrders = JSON.parse(fs.readFileSync(ORDER_FILE, "utf8"));
+        }
+        allOrders.push(orderDetails);
+        fs.writeFileSync(ORDER_FILE, JSON.stringify(allOrders, null, 2));
+
+        let summary = `✅ *Order Confirmed!*\n\n👤 Name: ${name}\n📍 Address: ${address}\n📞 Phone: ${phone}\n\n🛒 Items:\n`;
+        orders[chatId].cart.forEach(c => {
+            summary += `- ${c.item} x${c.quantity} = ₹${c.price}\n`;
+        });
+        summary += `\n💰 Total = ₹${total}\n\nThank you for shopping with us! 🙏`;
+
+        client.sendMessage(chatId, summary);
+
+        // Admin Notification
+        const adminNumber = "91XXXXXXXXXX@c.us"; // replace with your WhatsApp number
+        client.sendMessage(adminNumber, `📦 New Order Received:\n${summary}`);
+
+        orders[chatId] = { cart: [], stage: "start" };
+    }
+});
+
+client.initialize();
